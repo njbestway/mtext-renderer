@@ -77,6 +77,13 @@ function splitInlineFontFamily(family: string | undefined): {
   }
 }
 
+/** Resolved character of a word token: label, glyph shape, and pen advance. */
+interface ResolvedWordChar {
+  char: string
+  shape?: BaseTextShape
+  advance: number
+}
+
 /**
  * Options for formatting MText.
  */
@@ -317,15 +324,23 @@ export class MTextProcessor {
    * to keep the indent instead of snapping the first glyph back to the margin.
    */
   private _lineStartOffset: number = 0
+  /**
+   * Root group of the layout pass in progress ({@link processText}). Inline
+   * soft wraps flush the completed line through it so {@link processAlignment}
+   * can align that line on its own (center / right) instead of leaving its
+   * glyphs merged with the next line in one shared batch.
+   */
+  private _currentGroup: THREE.Group | undefined
   /** Current paragraph left margin in drawing units. */
   private _currentLeftMargin: number = 0
   /** Current paragraph right margin in drawing units. */
   private _currentRightMargin: number = 0
   /**
    * When true, {@link processChar} will not soft-wrap even if the pen is past the
-   * defined width. Used for Latin/ASCII word tokens (AutoCAD does not hyphenate
-   * them) and for a short Latin run that AutoCAD keeps on the current line with
-   * a slight overhang after CJK.
+   * defined width. Used for Latin/ASCII word tokens and for ASCII runs inside
+   * mixed CJK tokens (AutoCAD does not hyphenate either), including a short
+   * Latin run that AutoCAD keeps on the current line with a slight overhang
+   * after CJK.
    */
   private _suppressSoftWrap: boolean = false
 
@@ -397,6 +412,7 @@ export class MTextProcessor {
     this._currentLeftMargin = 0
     this._currentRightMargin = 0
     this._lineStartOffset = 0
+    this._currentGroup = undefined
     this.initLineParams()
   }
 
@@ -1332,6 +1348,7 @@ export class MTextProcessor {
     const lineCharBoxes: CharBox[] = []
 
     const group: THREE.Group = new THREE.Group()
+    this._currentGroup = group
 
     for (const token of tokens) {
       if (token.type === TokenType.NEW_PARAGRAPH) {
@@ -1539,6 +1556,33 @@ export class MTextProcessor {
   }
 
   /**
+   * Flushes the completed visual line into the root group before an inline
+   * (soft) line break.
+   *
+   * {@link advanceToNextLine} applies paragraph alignment to
+   * {@link _currentLineObjects}. Glyphs still pending in the style batches at
+   * that moment would skip the alignment pass and later merge with the next
+   * line's glyphs into one object, so a centered or right-aligned soft-wrapped
+   * line would render left-aligned (handle 3DEEB4: MiddleCenter `450米`).
+   */
+  private flushPendingGlyphs(
+    geometries: THREE.BufferGeometry[],
+    lineGeometries: THREE.BufferGeometry[],
+    meshCharBoxes: CharBox[],
+    lineCharBoxes: CharBox[]
+  ) {
+    const group = this._currentGroup
+    if (!group) return
+    this.processGeometries(
+      geometries,
+      lineGeometries,
+      meshCharBoxes,
+      lineCharBoxes,
+      group
+    )
+  }
+
+  /**
    * True when every code point is in Basic Latin / Latin-1 (drawing numbers,
    * hyphens, etc.). CJK and other scripts soft-wrap between characters.
    */
@@ -1555,13 +1599,14 @@ export class MTextProcessor {
   /**
    * Lays out and renders one parser word token, breaking to a new visual line when needed.
    *
-   * - CJK / non-Latin: no whole-word wrap — {@link processChar} breaks between
-   *   characters when the next glyph would not fit in the defined width.
-   * - Latin/ASCII: wrap only at word boundaries (spaces). AutoCAD/GstarCAD do
-   *   not hyphenate: a token wider than the column stays on one visual line and
-   *   overflows the box (e.g. part numbers like `1157*25*1.5`). A short run that
+   * - Pure Latin/ASCII: keep Western word wrapping, except a short run that
    *   only slightly overshoots after CJK (e.g. `秘密-FJP-898E-G`) may stay on
-   *   the current line with a small overhang.
+   *   the current line with a small overhang (AutoCAD). A token wider than the
+   *   column stays on one visual line and overflows (e.g. `1157*25*1.5`).
+   * - Mixed CJK + Latin/ASCII: the parser emits e.g. `2号回风立井总回风巷450米`
+   *   as ONE token; CJK may break between any two characters, but each ASCII
+   *   run inside the token is atomic — it moves to the next line as a whole
+   *   and is never split (`450` must not become `45` + `0`, handle 3DEEB4).
    *
    * @param word Character sequence for a single word token.
    * @param geometries Mesh geometry accumulator for the active style segment.
@@ -1576,36 +1621,62 @@ export class MTextProcessor {
     meshCharBoxes: CharBox[],
     lineCharBoxes: CharBox[]
   ) {
-    const resolvedChars: Array<{ char: string; shape?: BaseTextShape }> = []
+    const resolvedChars: ResolvedWordChar[] = []
     let wordWidth = 0
     const isLatinRun = this.isLatinAsciiRun(word)
+    const isDistributed =
+      this.currentHorizontalAlignment == MTextParagraphAlignment.DISTRIBUTED
 
     // Iterate by Unicode code point so supplementary-plane characters (e.g. 😀)
     // are not split into UTF-16 surrogate halves.
     for (const char of word) {
       const resolved = this.resolveCharShape(char)
       const shape = resolved?.shape
-      resolvedChars.push({ char, shape })
-
-      if (shape) {
-        if (
-          this.currentHorizontalAlignment == MTextParagraphAlignment.DISTRIBUTED
-        ) {
-          wordWidth += shape.width * this.currentWidthFactor
-        } else {
-          wordWidth += this.penAdvance(shape.width)
-        }
-      } else {
-        wordWidth += this.currentBlankAdvance
-      }
+      const advance = shape
+        ? isDistributed
+          ? shape.width * this.currentWidthFactor
+          : this.penAdvance(shape.width)
+        : this.currentBlankAdvance
+      resolvedChars.push({ char, shape, advance })
+      wordWidth += advance
     }
 
+    if (isLatinRun) {
+      this.processLatinRun(
+        resolvedChars,
+        wordWidth,
+        geometries,
+        lineGeometries,
+        meshCharBoxes,
+        lineCharBoxes
+      )
+      return
+    }
+    this.processMixedRun(
+      resolvedChars,
+      geometries,
+      lineGeometries,
+      meshCharBoxes,
+      lineCharBoxes
+    )
+  }
+
+  /**
+   * Lays out one pure Latin/ASCII token (no CJK) as a single unit.
+   *
+   * The token wraps only when it does not fit the remaining width and is never
+   * hyphenated; a token wider than the column overflows the box.
+   */
+  private processLatinRun(
+    resolvedChars: ResolvedWordChar[],
+    wordWidth: number,
+    geometries: THREE.BufferGeometry[],
+    lineGeometries: THREE.BufferGeometry[],
+    meshCharBoxes: CharBox[],
+    lineCharBoxes: CharBox[]
+  ) {
     const maxWidth = this.maxLineWidth || Infinity
-    if (
-      isLatinRun &&
-      this.hOffset + wordWidth > maxWidth &&
-      this.hOffset > 0
-    ) {
+    if (this.hOffset + wordWidth > maxWidth && this.hOffset > 0) {
       const overflow = this.hOffset + wordWidth - maxWidth
       const allowOverflow =
         this.currentLayoutFontSize * this.currentWidthFactor * 2
@@ -1615,14 +1686,18 @@ export class MTextProcessor {
         // Western word wrap: move the whole token to the next line. AutoCAD
         // does not then hyphenate; a token wider than the column overflows.
         this.recordVisualLineBreak(meshCharBoxes, lineCharBoxes)
+        this.flushPendingGlyphs(
+          geometries,
+          lineGeometries,
+          meshCharBoxes,
+          lineCharBoxes
+        )
         this.advanceToNextLine(false)
       }
     }
 
     // Latin/ASCII: never soft-wrap between characters inside one word token.
-    if (isLatinRun) {
-      this._suppressSoftWrap = true
-    }
+    this._suppressSoftWrap = true
     try {
       for (const { char } of resolvedChars) {
         this.processChar(
@@ -1634,9 +1709,81 @@ export class MTextProcessor {
         )
       }
     } finally {
-      if (isLatinRun) {
+      this._suppressSoftWrap = false
+    }
+  }
+
+  /**
+   * Lays out a token that mixes CJK with Latin/ASCII runs.
+   *
+   * CJK characters soft-wrap between any two characters (via
+   * {@link processChar}), while each contiguous ASCII run is atomic: when the
+   * run does not fit the remaining width it starts the next line as a whole,
+   * mirroring AutoCAD (never `45` + `0` for `450`).
+   */
+  private processMixedRun(
+    resolvedChars: ResolvedWordChar[],
+    geometries: THREE.BufferGeometry[],
+    lineGeometries: THREE.BufferGeometry[],
+    meshCharBoxes: CharBox[],
+    lineCharBoxes: CharBox[]
+  ) {
+    const maxWidth = this.maxLineWidth || Infinity
+    let i = 0
+    while (i < resolvedChars.length) {
+      const code = resolvedChars[i].char.codePointAt(0) ?? 0
+      if (code >= 0x0100) {
+        this.processChar(
+          resolvedChars[i].char,
+          geometries,
+          lineGeometries,
+          meshCharBoxes,
+          lineCharBoxes
+        )
+        i++
+        continue
+      }
+
+      // Measure the whole ASCII run before placing any of it.
+      let end = i
+      let runWidth = 0
+      while (end < resolvedChars.length) {
+        const runCode = resolvedChars[end].char.codePointAt(0) ?? 0
+        if (runCode >= 0x0100) break
+        runWidth += resolvedChars[end].advance
+        end++
+      }
+
+      if (this.hOffset > 0 && this.hOffset + runWidth > maxWidth) {
+        // The run does not fit after the current content: move it — never
+        // split it — onto the next line.
+        this.recordVisualLineBreak(meshCharBoxes, lineCharBoxes)
+        this.flushPendingGlyphs(
+          geometries,
+          lineGeometries,
+          meshCharBoxes,
+          lineCharBoxes
+        )
+        this.advanceToNextLine(false)
+      }
+
+      // Place the run without per-character soft wrap: a run wider than the
+      // whole column overflows instead of hyphenating.
+      this._suppressSoftWrap = true
+      try {
+        for (let k = i; k < end; k++) {
+          this.processChar(
+            resolvedChars[k].char,
+            geometries,
+            lineGeometries,
+            meshCharBoxes,
+            lineCharBoxes
+          )
+        }
+      } finally {
         this._suppressSoftWrap = false
       }
+      i = end
     }
   }
 
@@ -2107,7 +2254,8 @@ export class MTextProcessor {
    *
    * Missing glyphs are treated as spaces. Soft wrap is decided before placement:
    * if the glyph's advance would not fit in the remaining defined width, break
-   * first (CJK may break between any two characters). Latin/ASCII word tokens
+   * first (CJK may break between any two characters), flushing the completed
+   * line so paragraph alignment applies to it alone. Latin/ASCII word tokens
    * suppress this so they overflow instead of hyphenating. The first glyph on an
    * empty line is always placed even when wider than the box.
    *
@@ -2158,6 +2306,12 @@ export class MTextProcessor {
       this.hOffset + wrapAdvance > maxWidth
     ) {
       this.recordVisualLineBreak(meshCharBoxes, lineCharBoxes)
+      this.flushPendingGlyphs(
+        geometries,
+        lineGeometries,
+        meshCharBoxes,
+        lineCharBoxes
+      )
       this.advanceToNextLine(false)
     }
 
