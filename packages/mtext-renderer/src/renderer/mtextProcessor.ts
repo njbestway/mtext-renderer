@@ -310,6 +310,13 @@ export class MTextProcessor {
   private _meshBatchEntries: TransformedLineGeometryEntry[] = []
   /** Current paragraph first-line indent in drawing units. */
   private _currentIndent: number = 0
+  /**
+   * Pen x-offset at the first glyph of the current visual line, in drawing
+   * units. A `\\p` first-line indent lands on the pen before any glyph is
+   * placed, so left alignment must resolve the line start against this offset
+   * to keep the indent instead of snapping the first glyph back to the margin.
+   */
+  private _lineStartOffset: number = 0
   /** Current paragraph left margin in drawing units. */
   private _currentLeftMargin: number = 0
   /** Current paragraph right margin in drawing units. */
@@ -389,6 +396,7 @@ export class MTextProcessor {
     this._currentIndent = 0
     this._currentLeftMargin = 0
     this._currentRightMargin = 0
+    this._lineStartOffset = 0
     this.initLineParams()
   }
 
@@ -918,6 +926,29 @@ export class MTextProcessor {
   }
 
   /**
+   * Resolves a paragraph `\\p...i` indent value to drawing units.
+   *
+   * AutoCAD documents the value as a multiple of the text height, and most
+   * producers write it that way. Some producers instead write the first-line
+   * indent directly in drawing units. A height multiple that exceeds the
+   * usable line width is impossible, so treat the raw value as drawing units
+   * when that contradiction occurs and the raw value itself still fits.
+   */
+  private resolveIndentValue(indent: number): number {
+    const scaled = indent * this.defaultFontSize
+    const lineWidth = this.maxLineWidth
+    if (
+      lineWidth > 0 &&
+      Number.isFinite(lineWidth) &&
+      Math.abs(scaled) > lineWidth &&
+      Math.abs(indent) <= lineWidth
+    ) {
+      return indent
+    }
+    return scaled
+  }
+
+  /**
    * Applies indent and margins from a paragraph snapshot only.
    *
    * Used when exiting `{}` formatting groups: the parser restores full context
@@ -930,7 +961,7 @@ export class MTextProcessor {
   ) {
     if (!paragraph) return
     if (typeof paragraph.indent === 'number') {
-      this._currentIndent = paragraph.indent * this.defaultFontSize
+      this._currentIndent = this.resolveIndentValue(paragraph.indent)
       this._hOffset += this._currentIndent
     }
     if (typeof paragraph.left === 'number') {
@@ -954,7 +985,7 @@ export class MTextProcessor {
         paragraph.align as MTextParagraphAlignment
     }
     if (typeof paragraph.indent === 'number') {
-      this._currentIndent = paragraph.indent * this.defaultFontSize
+      this._currentIndent = this.resolveIndentValue(paragraph.indent)
       this._hOffset += this._currentIndent
     }
     if (typeof paragraph.left === 'number') {
@@ -2106,6 +2137,9 @@ export class MTextProcessor {
 
     if (!this._lineHasRenderableChar) {
       this.applyPendingEmptyLineYAdjust()
+      // First glyph of a visual line: remember the pen origin so LEFT
+      // alignment can preserve a paragraph first-line indent.
+      this._lineStartOffset = this._hOffset
     }
 
     const maxWidth = this.maxLineWidth || Infinity
@@ -2458,6 +2492,7 @@ export class MTextProcessor {
     }
     this._lineCount++
     this.processAlignment()
+    this._lineStartOffset = 0
     this._currentLineObjects = []
     if (this._lineCount == 2) {
       this._totalHeight = this.currentMaxFontSize
@@ -2606,7 +2641,7 @@ export class MTextProcessor {
 
     const applyLeftAlignment = () => {
       const dx = Number.isFinite(this.maxLineWidth)
-        ? this._currentLeftMargin - resolvedBBox.min.x
+        ? this._currentLeftMargin + this._lineStartOffset - resolvedBBox.min.x
         : this._currentLeftMargin
 
       const translated = new Set<THREE.Object3D>()
