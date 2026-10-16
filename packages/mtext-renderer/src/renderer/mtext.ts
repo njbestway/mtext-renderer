@@ -880,28 +880,6 @@ export class MText extends THREE.Object3D {
       maxY += emptyAbove
       minY -= emptyBelow
     }
-    // eslint-disable-next-line no-console
-    if (emptyAbove > 1 || emptyBelow > 1) {
-      const rawLines: number[][] = []
-      object.traverse(o => {
-        const l = o.userData?.lineLayouts as LineLayout[] | undefined
-        if (Array.isArray(l) && l.length > rawLines.length) {
-          rawLines.length = 0
-          l.forEach(x => rawLines.push([+x.y.toFixed(3), +x.height.toFixed(3)]))
-        }
-      })
-      console.warn('[MTEXT-ANCHOR-DBG]', JSON.stringify({
-        flow: flowDirection,
-        lines: rawLines,
-        gMinY: +geometryBox.min.y.toFixed(3),
-        gMaxY: +geometryBox.max.y.toFixed(3),
-        emptyAbove: +emptyAbove.toFixed(3),
-        emptyBelow: +emptyBelow.toFixed(3),
-        minY: +minY.toFixed(3),
-        maxY: +maxY.toFixed(3),
-        centerY: +((minY + maxY) / 2).toFixed(3)
-      }))
-    }
     const baselineY = lineBounds.hasLine ? lineBounds.baselineY : minY
 
     return { minX, maxX, minY, maxY, baselineY }
