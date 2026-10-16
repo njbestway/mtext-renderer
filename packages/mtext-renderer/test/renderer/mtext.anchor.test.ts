@@ -492,4 +492,129 @@ describe('MText attachment anchoring', () => {
     expect(mtext.box.min.y).toBeGreaterThan(position.y - 100)
     expect(mtext.box.max.y).toBeLessThan(position.y + 100)
   })
+
+  describe('empty-paragraph vertical anchoring', () => {
+    // A leading/trailing empty `\P` paragraph emits no glyph geometry, so the
+    // visible Box3 used for anchoring under-counts the paragraph block and
+    // AutoCAD-style Middle/Top/Bottom attachment drifts. The fix folds the
+    // empty advance back into the anchor frame; these cases pin that behavior
+    // against a no-empty control and derive the expected shift from the
+    // measured line pitch (so they do not hard-code the spacing model).
+
+    function collectLineLayouts(object: THREE.Object3D) {
+      let layouts: Array<{ y: number; height: number }> = []
+      object.traverse(child => {
+        const lines = child.userData?.lineLayouts as
+          | Array<{ y: number; height: number }>
+          | undefined
+        if (Array.isArray(lines) && lines.length > layouts.length) {
+          layouts = lines
+        }
+      })
+      return layouts
+    }
+
+    function visibleBox(attachmentPoint: MTextAttachmentPoint, text: string) {
+      const mtext = createTextFixture({
+        text,
+        height: 24,
+        width: 0,
+        attachmentPoint
+      })
+      mtext.syncDraw()
+      return { mtext, box: createGeometryBox(mtext) }
+    }
+
+    // Vertical advance of the single empty line sitting above the visible
+    // block: distance from the top empty line box down to the first visible
+    // line box (one line pitch for a uniform-height fake font).
+    function leadingEmptyAdvance(object: THREE.Object3D) {
+      const layouts = collectLineLayouts(object)
+      // layouts are recorded top-to-bottom; index 0 is the leading empty line.
+      return layouts[0].y - layouts[1].y
+    }
+
+    it('keeps MiddleCenter visible block centered when there are no empty paragraphs', () => {
+      const { box } = visibleBox(
+        MTextAttachmentPoint.MiddleCenter,
+        'AA\\PBB'
+      )
+      const centerY = (box.min.y + box.max.y) / 2
+      // Zero-regression: unchanged visible-only centering keeps the block on 0.
+      expect(centerY).toBeCloseTo(0, 4)
+    })
+
+    it('counts a leading empty paragraph toward MiddleCenter attachment', () => {
+      const control = visibleBox(MTextAttachmentPoint.MiddleCenter, 'AA\\PBB')
+      const withEmpty = visibleBox(
+        MTextAttachmentPoint.MiddleCenter,
+        '\\PAA\\PBB'
+      )
+
+      const controlCenterY = (control.box.min.y + control.box.max.y) / 2
+      const emptyCenterY = (withEmpty.box.min.y + withEmpty.box.max.y) / 2
+      const advance = leadingEmptyAdvance(withEmpty.mtext)
+
+      // The full paragraph block (empty line included) is centered on 0, so the
+      // visible lines shift down by half the leading empty advance.
+      expect(controlCenterY).toBeCloseTo(0, 4)
+      expect(emptyCenterY).toBeCloseTo(-advance / 2, 4)
+    })
+
+    it('counts a leading empty paragraph toward TopCenter attachment', () => {
+      const control = visibleBox(MTextAttachmentPoint.TopCenter, 'AA\\PBB')
+      const withEmpty = visibleBox(
+        MTextAttachmentPoint.TopCenter,
+        '\\PAA\\PBB'
+      )
+
+      const advance = leadingEmptyAdvance(withEmpty.mtext)
+      // Top pins the frame top (now including the empty line) at the insertion
+      // point, so the visible block drops by the full leading advance.
+      expect(withEmpty.box.max.y).toBeCloseTo(control.box.max.y - advance, 4)
+    })
+
+    it('counts a trailing empty paragraph toward BottomCenter attachment', () => {
+      const control = visibleBox(MTextAttachmentPoint.BottomCenter, 'AA\\PBB')
+      const withEmpty = visibleBox(
+        MTextAttachmentPoint.BottomCenter,
+        'AA\\PBB\\P'
+      )
+
+      const layouts = collectLineLayouts(withEmpty.mtext)
+      expect(layouts.length).toBe(3)
+      const advance = layouts[layouts.length - 2].y - layouts[layouts.length - 1].y
+      // Bottom pins the frame bottom (now including the trailing empty line),
+      // so the visible block rises by the full trailing advance.
+      expect(withEmpty.box.min.y).toBeCloseTo(control.box.min.y + advance, 4)
+    })
+
+    it('nets leading and trailing empty paragraphs for MiddleCenter (asymmetric)', () => {
+      // 1 leading + 2 trailing empty paragraphs (mirrors the real title block
+      // `\P<empty>...visible...\P<empty>\P<empty>`). MiddleCenter must centre the
+      // whole block, so the visible lines move up by (emptyBelow - emptyAbove)/2.
+      const control = visibleBox(MTextAttachmentPoint.MiddleCenter, 'AA\\PBB')
+      const withEmpty = visibleBox(
+        MTextAttachmentPoint.MiddleCenter,
+        '\\PAA\\PBB\\P\\P'
+      )
+
+      const layouts = collectLineLayouts(withEmpty.mtext)
+      expect(layouts.length).toBe(5)
+      const emptyAbove = layouts[0].y - layouts[1].y
+      const emptyBelow =
+        layouts[2].y - layouts[layouts.length - 1].y
+      const controlCenterY =
+        (control.box.min.y + control.box.max.y) / 2
+      const emptyCenterY =
+        (withEmpty.box.min.y + withEmpty.box.max.y) / 2
+
+      expect(emptyCenterY - controlCenterY).toBeCloseTo(
+        (emptyBelow - emptyAbove) / 2,
+        4
+      )
+      // More empty space below than above must lift the visible block upward.
+      expect(emptyCenterY).toBeGreaterThan(controlCenterY)
+    })
+  })
 })

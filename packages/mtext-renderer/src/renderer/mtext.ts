@@ -788,9 +788,15 @@ export class MText extends THREE.Object3D {
       hasLine: false,
       minY: Infinity,
       maxY: -Infinity,
-      baselineY: 0
+      baselineY: 0,
+      hasVisible: false,
+      maxVisibleTop: -Infinity,
+      minVisibleBottom: Infinity
     }
     let firstBaselineCaptured = false
+
+    const glyphTop = geometryBox.isEmpty() ? 0 : geometryBox.max.y
+    const glyphBottom = geometryBox.isEmpty() ? 0 : geometryBox.min.y
 
     object.traverse(obj => {
       const lines = obj.userData?.lineLayouts as LineLayout[] | undefined
@@ -806,8 +812,40 @@ export class MText extends THREE.Object3D {
           lineBounds.baselineY = minY
           firstBaselineCaptured = true
         }
+        // A line carries visible text iff its vertical center falls inside the
+        // rendered-ink band [glyphBottom, glyphTop]. Do NOT use box/ink overlap:
+        // a real glyph descender on the last visible line dips a few units past
+        // its own line box into the following empty paragraph's box, so overlap
+        // over-counts and the trailing empty advance is lost (symmetric -> no
+        // MiddleCenter shift). The line center is robust because an empty
+        // paragraph sits a full line pitch outside the ink band, far more than
+        // any descender overshoot. Track the visible band's box extent so the
+        // empty advance is added to the anchor frame without disturbing the
+        // visible lines' own leading.
+        if (
+          !geometryBox.isEmpty() &&
+          line.y >= glyphBottom &&
+          line.y <= glyphTop
+        ) {
+          lineBounds.hasVisible = true
+          lineBounds.maxVisibleTop = Math.max(lineBounds.maxVisibleTop, maxY)
+          lineBounds.minVisibleBottom = Math.min(
+            lineBounds.minVisibleBottom,
+            minY
+          )
+        }
       })
     })
+
+    // Vertical advance of empty paragraphs above / below the visible glyphs.
+    // Zero unless empty `\P` lines lie outside the glyph band (so single-block
+    // text keeps its current, leading-free frame).
+    let emptyAbove = 0
+    let emptyBelow = 0
+    if (lineBounds.hasVisible) {
+      emptyAbove = Math.max(0, lineBounds.maxY - lineBounds.maxVisibleTop)
+      emptyBelow = Math.max(0, lineBounds.minVisibleBottom - lineBounds.minY)
+    }
 
     const geometryHeight = geometryBox.isEmpty()
       ? 0
@@ -834,6 +872,35 @@ export class MText extends THREE.Object3D {
     } else {
       maxY = geometryBox.isEmpty() ? 0 : geometryBox.max.y
       minY = maxY - frameHeight
+    }
+    // Extend the anchor frame by the leading/trailing empty-paragraph advance so
+    // Middle/Top/Bottom attachment centres the full paragraph block (as AutoCAD
+    // does). No-op when there are no empty paragraphs (zero regression).
+    if (frameHeight > 0 && !geometryBox.isEmpty()) {
+      maxY += emptyAbove
+      minY -= emptyBelow
+    }
+    // eslint-disable-next-line no-console
+    if (emptyAbove > 1 || emptyBelow > 1) {
+      const rawLines: number[][] = []
+      object.traverse(o => {
+        const l = o.userData?.lineLayouts as LineLayout[] | undefined
+        if (Array.isArray(l) && l.length > rawLines.length) {
+          rawLines.length = 0
+          l.forEach(x => rawLines.push([+x.y.toFixed(3), +x.height.toFixed(3)]))
+        }
+      })
+      console.warn('[MTEXT-ANCHOR-DBG]', JSON.stringify({
+        flow: flowDirection,
+        lines: rawLines,
+        gMinY: +geometryBox.min.y.toFixed(3),
+        gMaxY: +geometryBox.max.y.toFixed(3),
+        emptyAbove: +emptyAbove.toFixed(3),
+        emptyBelow: +emptyBelow.toFixed(3),
+        minY: +minY.toFixed(3),
+        maxY: +maxY.toFixed(3),
+        centerY: +((minY + maxY) / 2).toFixed(3)
+      }))
     }
     const baselineY = lineBounds.hasLine ? lineBounds.baselineY : minY
 
