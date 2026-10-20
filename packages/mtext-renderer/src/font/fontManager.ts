@@ -20,6 +20,7 @@ import {
   SYMBOL_FONTS_PRESETS
 } from './defaultFontsPresets'
 import { FontData, FontType } from './font'
+import { resolveFontNameAlias } from './fontAliases'
 import { FontFactory } from './fontFactory'
 import { FontInfo, FontLoader, FontLoadStatus } from './fontLoader'
 
@@ -314,10 +315,15 @@ export class FontManager {
    * paths — do not await from the hot glyph loop.
    */
   requestFont(fontName: string): Promise<FontLoadStatus[]> {
-    const key = this.normalizeFontName(fontName)
-    if (!key) {
+    const requestedKey = this.normalizeFontName(fontName)
+    if (!requestedKey) {
       return Promise.resolve([])
     }
+    // Requested face wins over its alias so a repository that publishes the
+    // original family is loaded instead of the stand-in face.
+    const key = this.loadedFontMap.has(requestedKey)
+      ? requestedKey
+      : (resolveFontNameAlias(requestedKey) ?? requestedKey)
     if (this.isFontLoaded(key)) {
       this.fontRequestFailed.delete(key)
       return Promise.resolve([])
@@ -387,6 +393,20 @@ export class FontManager {
     return Promise.all(fontNames.map(name => this.requestFont(name))).then(
       results => results.flat()
     )
+  }
+
+  /**
+   * Lookup keys of a font name, most specific first: the normalized name and,
+   * when the repository does not publish it, its built-in alias face
+   * (e.g. `MS PGothic` → `msgothic`).
+   */
+  private fontNameKeys(fontName: string): string[] {
+    const key = this.normalizeFontName(fontName)
+    if (!key) {
+      return []
+    }
+    const alias = resolveFontNameAlias(key)
+    return alias ? [key, alias] : [key]
   }
 
   private normalizeFontName(fontName: string): string {
@@ -655,6 +675,10 @@ export class FontManager {
   /**
    * Tries to find the specified font. If not found, uses a replacement font and returns its name.
    *
+   * A face loaded under a built-in alias (`FONT_NAME_ALIASES`, such as
+   * `msgothic` standing in for `MS PGothic`) counts as found and is returned
+   * instead of a default.
+   *
    * When the requested face is not loaded, the original name is recorded in
    * {@link missedFonts} and {@link events.fontNotFound} is dispatched (once per
    * miss cycle) so hosts can surface missing-font UI. Lazy loading still
@@ -666,29 +690,31 @@ export class FontManager {
   findAndReplaceFont(fontName: string) {
     const requested = fontName == null ? '' : String(fontName)
     const missName = this.stripFontFileExtension(requested)
-    let font = this.loadedFontMap.get(requested.toLowerCase())
-    if (font == null && missName && missName !== requested) {
-      font = this.loadedFontMap.get(missName.toLowerCase())
-    }
-    if (font == null) {
-      const mappedFontName = this.fontMapping[requested]
-      if (mappedFontName) {
-        font = this.loadedFontMap.get(mappedFontName.toLowerCase())
-        if (!font && this.lazyFontLoading) {
-          void this.requestFont(mappedFontName)
-        }
-        // Drawing still asked for the original face — report it even when a
-        // mapping supplies a replacement (do not also request the original).
-        this.recordMissedFonts(missName, false)
-        // Prefer the mapped face even while it is still loading (legacy behavior).
-        return mappedFontName
+    // Loaded face under the requested name, or under its alias: `MS PGothic`
+    // is served by the `msgothic` collection the repository does publish. An
+    // alias we can draw with is a substitution, not a missing resource, so it
+    // reports nothing.
+    const keys = this.fontNameKeys(requested)
+    for (let i = 0; i < keys.length; i++) {
+      if (this.loadedFontMap.has(keys[i])) {
+        // Keep the drawing's own spelling for the requested face (callers and
+        // hosts report it); an alias hit has no original spelling to keep, so
+        // its key is returned because callers feed it back into the loaded-font
+        // lookups.
+        return i === 0 ? missName || requested : keys[i]
       }
     }
-    if (font) {
-      // Return the stripped/normalized key that matches loadedFontMap, not the
-      // raw `malgun.ttf` request string — callers pass this into isFontLoaded /
-      // getFontScaleFactor which historically did not strip extensions.
-      return missName || requested
+    const mappedFontName = this.fontMapping[requested]
+    if (mappedFontName) {
+      const mappedFont = this.loadedFontMap.get(mappedFontName.toLowerCase())
+      if (!mappedFont && this.lazyFontLoading) {
+        void this.requestFont(mappedFontName)
+      }
+      // Drawing still asked for the original face — report it even when a
+      // mapping supplies a replacement (do not also request the original).
+      this.recordMissedFonts(missName, false)
+      // Prefer the mapped face even while it is still loading (legacy behavior).
+      return mappedFontName
     }
     // Not loaded and no mapping — record miss (schedules lazy load once).
     this.recordMissedFonts(missName, true)
@@ -746,27 +772,16 @@ export class FontManager {
     fontName: string,
     recordMissedFonts: boolean = true
   ): BaseFont | undefined {
-    if (fontName == null) {
-      fontName = '' // take null/undefined as empty
-    }
-
-    // Check if font name contain file extension
-    const dotIndex = fontName.lastIndexOf('.')
-    if (
-      dotIndex > 0 &&
-      (dotIndex === fontName.length - 4 || dotIndex === fontName.length - 5)
-    ) {
-      // Remove extension of font file name
-      fontName = fontName.substring(0, dotIndex)
-    }
-    const currentFont = this.loadedFontMap.get(fontName.toLowerCase())
-    if (!currentFont) {
-      if (recordMissedFonts) {
-        this.recordMissedFonts(fontName)
+    for (const key of this.fontNameKeys(fontName ?? '')) {
+      const font = this.loadedFontMap.get(key)
+      if (font) {
+        return font
       }
-      return undefined
     }
-    return currentFont
+    if (recordMissedFonts) {
+      this.recordMissedFonts(this.stripFontFileExtension(fontName ?? ''))
+    }
+    return undefined
   }
 
   /**
@@ -903,6 +918,38 @@ export class FontManager {
   }
 
   /**
+   * Last-resort glyph lookup across every loaded face.
+   *
+   * Used after the style font, bigFont, default fonts and symbol fonts have
+   * all failed, so a character only present in some other face already in
+   * memory is drawn instead of the `?` placeholder. Faces are probed with
+   * {@link BaseFont.hasChar} first because asking a font for a glyph it lacks
+   * also records it as an unsupported character.
+   *
+   * @param char - The character to get the shape for
+   * @param size - The size of the shape
+   * @returns The first renderable shape found, or undefined when no loaded
+   *   face provides the glyph
+   */
+  public getCharShapeFromLoadedFonts(
+    char: string,
+    size: number
+  ): BaseTextShape | undefined {
+    const probed = new Set<BaseFont>()
+    for (const [, font] of this.loadedFontMap) {
+      if (probed.has(font) || !font.hasChar(char)) {
+        continue
+      }
+      probed.add(font)
+      const shape = font.getCharShape(char, size)
+      if (shape) {
+        return shape
+      }
+    }
+    return undefined
+  }
+
+  /**
    * Gets the shape to display when a character is not found
    * @param size - The size of the shape
    * @returns The shape for the not found indicator, or undefined if not available
@@ -921,8 +968,9 @@ export class FontManager {
    * @returns True if the font is loaded, false otherwise
    */
   isFontLoaded(fontName: string): boolean {
-    const key = this.normalizeFontName(fontName)
-    return !!key && this.loadedFontMap.has(key)
+    return this.fontNameKeys(fontName).some(key =>
+      this.loadedFontMap.has(key)
+    )
   }
 
   /**

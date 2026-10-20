@@ -1,4 +1,5 @@
 import { getFileNameWithoutExtension } from '../common'
+import { resolveFontNameAlias } from './fontAliases'
 import { FontInfo, FontLoader, FontLoadStatus } from './fontLoader'
 import { FontManager } from './fontManager'
 
@@ -134,7 +135,7 @@ export class DefaultFontLoader implements FontLoader {
     // Keep normal caching for the common path; revalidate at most once per baseUrl
     // when a requested name is absent from the in-memory catalog.
     const missingFromCatalog = fontNames.some(
-      font => !this._avaiableFontMap.has(font.toLowerCase())
+      font => !this._avaiableFontMap.has(this.catalogKey(font))
     )
     if (missingFromCatalog && !this._catalogRefreshAttempted) {
       this._catalogRefreshAttempted = true
@@ -147,7 +148,7 @@ export class DefaultFontLoader implements FontLoader {
     const seenFiles = new Set<string>()
     fontNames.forEach(font => {
       const lowerCaseFontName = font.toLowerCase()
-      const fontInfo = this._avaiableFontMap.get(lowerCaseFontName)
+      const fontInfo = this._avaiableFontMap.get(this.catalogKey(font))
       if (fontInfo) {
         requestedFontInfos.set(lowerCaseFontName, fontInfo)
         if (FontManager.instance.isFontLoaded(lowerCaseFontName)) {
@@ -227,6 +228,24 @@ export class DefaultFontLoader implements FontLoader {
       })
     }
     return statuses
+  }
+
+  /**
+   * Catalog key of a requested font name: the name itself when the repository
+   * publishes it, otherwise its built-in alias face (`MS PGothic` is served by
+   * the `msgothic` collection). Statuses stay reported under the requested
+   * name, the file-derived status merge in {@link load} maps the alias result
+   * back.
+   */
+  private catalogKey(fontName: string): string {
+    const lowerCaseFontName = fontName.toLowerCase()
+    if (this._avaiableFontMap.has(lowerCaseFontName)) {
+      return lowerCaseFontName
+    }
+    const alias = resolveFontNameAlias(lowerCaseFontName)
+    return alias && this._avaiableFontMap.has(alias)
+      ? alias
+      : lowerCaseFontName
   }
 
   private clearAvailableFontsCache() {

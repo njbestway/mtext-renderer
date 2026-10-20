@@ -404,6 +404,47 @@ describe('DefaultFontLoader', () => {
     ])
   })
 
+  it('resolves built-in family aliases through the catalog', async () => {
+    vi.mocked(FontManager.instance.isFontLoaded).mockReturnValue(false)
+    vi.mocked(FontManager.instance.loadFonts).mockResolvedValue([
+      {
+        fontName: 'msgothic',
+        url: 'https://cdn.example.com/fonts/msgothic.woff',
+        status: 'Success'
+      }
+    ])
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse([
+          {
+            name: ['msgothic', 'MS Gothic', 'ＭＳ ゴシック'],
+            file: 'msgothic.woff',
+            type: 'mesh',
+            url: ''
+          }
+        ])
+      )
+    )
+    const loader = new DefaultFontLoader()
+    loader.baseUrl = 'https://cdn.example.com/fonts/'
+
+    const statuses = await loader.load(['MS PGothic'])
+
+    // The alias is a catalog hit, so stale-metadata revalidation must not run.
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(FontManager.instance.loadFonts).toHaveBeenCalledWith([
+      expect.objectContaining({ file: 'msgothic.woff' })
+    ])
+    expect(statuses).toEqual([
+      {
+        fontName: 'ms pgothic',
+        url: 'https://cdn.example.com/fonts/msgothic.woff',
+        status: 'Success'
+      }
+    ])
+  })
+
   it('returns success immediately for already loaded requested fonts', async () => {
     vi.mocked(FontManager.instance.isFontLoaded).mockReturnValue(true)
     const loader = new DefaultFontLoader()

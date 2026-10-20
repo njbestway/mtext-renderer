@@ -646,6 +646,38 @@ describe('MTextProcessor TextStyle glyph fallback (AutoCAD semantics)', () => {
     expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10)
   })
 
+  it('draws the glyph from another loaded face before the not-found placeholder', () => {
+    const heavyGreekCross = '✚'
+    const loadedShape = createShape(7)
+
+    const getCharShape = vi.fn(() => undefined)
+    const getCharShapeFromLoadedFonts = vi.fn(() => loadedShape)
+    const getNotFoundTextShape = vi.fn(() => createShape(99))
+
+    const processor = createGlyphFallbackProcessor(
+      { font: 'msgothic', bigFont: '' },
+      {
+        getFontScaleFactor: () => 1,
+        getFontType: () => 'mesh' as const,
+        findAndReplaceFont: (name: string) => name,
+        getCharShape,
+        getCharShapeFromDefaults: vi.fn(() => undefined),
+        getCodeShapeFromSymbolFonts: vi.fn(() => undefined),
+        getCharShapeFromLoadedFonts,
+        getNotFoundTextShape
+      }
+    )
+
+    const shape = (processor as any).getCharShape(heavyGreekCross)
+
+    expect(shape).toBe(loadedShape)
+    expect(getCharShapeFromLoadedFonts).toHaveBeenCalledWith(
+      heavyGreekCross,
+      10
+    )
+    expect(getNotFoundTextShape).not.toHaveBeenCalled()
+  })
+
   it('uses not-found shape when no font provides the glyph', () => {
     const notFoundShape = createShape(99)
 

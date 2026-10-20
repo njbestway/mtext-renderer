@@ -2602,6 +2602,13 @@ export class MTextProcessor {
       }
     }
 
+    // Last resort before the `?` placeholder: a loaded face carrying the glyph
+    // draws better than a question mark (e.g. `✚` U+271A, only in the MS Gothic
+    // collection that `MS PGothic` aliases to).
+    if (!shape) {
+      shape = this.getCharShapeFromAnyLoadedFont(char)
+    }
+
     if (!shape || !this.shapeHasStrokeGeometry(shape, char)) {
       shape = this.fontManager.getNotFoundTextShape(this.currentFontSize)
       if (!shape) {
@@ -2630,6 +2637,25 @@ export class MTextProcessor {
     }
     const font = getFontByName.call(this.fontManager, fontName, false)
     return font?.hasChar(char) ?? false
+  }
+
+  /**
+   * Looks the glyph up in every font already loaded into memory.
+   *
+   * Hosts passing a partial font manager may not implement the lookup, in
+   * which case the caller falls through to the not-found placeholder.
+   *
+   * @param char Character to resolve.
+   * @returns Shape from the first loaded face providing it, otherwise `undefined`.
+   */
+  private getCharShapeFromAnyLoadedFont(
+    char: string
+  ): BaseTextShape | undefined {
+    const lookup = this.fontManager.getCharShapeFromLoadedFonts
+    if (typeof lookup !== 'function') {
+      return undefined
+    }
+    return lookup.call(this.fontManager, char, this.currentFontSize)
   }
 
   /**
