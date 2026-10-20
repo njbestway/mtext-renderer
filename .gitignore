@@ -45,3 +45,7 @@ Thumbs.db
 # Local font downloads + previous bench metrics for `pnpm bench`
 packages/mtext-renderer/.font-cache
 packages/mtext-renderer/.bench-results
+
+# Local fork link: packages/mtext-parser is a machine-specific junction to
+# the mtext-parser dev repository (never commit it).
+/packages/mtext-parser

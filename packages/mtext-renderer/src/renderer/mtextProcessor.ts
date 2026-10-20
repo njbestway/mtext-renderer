@@ -343,6 +343,15 @@ export class MTextProcessor {
    * after CJK.
    */
   private _suppressSoftWrap: boolean = false
+  /**
+   * True when the pen sits on a legal word-break opportunity: the start of a
+   * visual line, right after whitespace, or right after a CJK glyph. Inline
+   * property commands (`\C`, `\H`, ...) split the parser token stream without
+   * inserting whitespace, so they must not create one: AutoCAD keeps
+   * `Y:\C256;37430392.9` on one visual line and lets it overflow (handle
+   * 33A8D1).
+   */
+  private _atWrapOpportunity: boolean = true
 
   /**
    * Construct one instance of this class and initialize some properties with default values.
@@ -1349,6 +1358,7 @@ export class MTextProcessor {
 
     const group: THREE.Group = new THREE.Group()
     this._currentGroup = group
+    this._atWrapOpportunity = true
 
     for (const token of tokens) {
       if (token.type === TokenType.NEW_PARAGRAPH) {
@@ -1664,8 +1674,11 @@ export class MTextProcessor {
   /**
    * Lays out one pure Latin/ASCII token (no CJK) as a single unit.
    *
-   * The token wraps only when it does not fit the remaining width and is never
-   * hyphenated; a token wider than the column overflows the box.
+   * The token wraps only when it does not fit the remaining width, is never
+   * hyphenated, and follows a real word boundary (whitespace, CJK, or line
+   * start). A token wider than the column overflows the box. An inline
+   * property command does not insert whitespace, so `Y:\C256;37430392.9`
+   * stays on one visual line (handle 33A8D1).
    */
   private processLatinRun(
     resolvedChars: ResolvedWordChar[],
@@ -1676,7 +1689,11 @@ export class MTextProcessor {
     lineCharBoxes: CharBox[]
   ) {
     const maxWidth = this.maxLineWidth || Infinity
-    if (this.hOffset + wordWidth > maxWidth && this.hOffset > 0) {
+    if (
+      this._atWrapOpportunity &&
+      this.hOffset + wordWidth > maxWidth &&
+      this.hOffset > 0
+    ) {
       const overflow = this.hOffset + wordWidth - maxWidth
       const allowOverflow =
         this.currentLayoutFontSize * this.currentWidthFactor * 2
@@ -1754,7 +1771,11 @@ export class MTextProcessor {
         end++
       }
 
-      if (this.hOffset > 0 && this.hOffset + runWidth > maxWidth) {
+      if (
+        this._atWrapOpportunity &&
+        this.hOffset > 0 &&
+        this.hOffset + runWidth > maxWidth
+      ) {
         // The run does not fit after the current content: move it — never
         // split it — onto the next line.
         this.recordVisualLineBreak(meshCharBoxes, lineCharBoxes)
@@ -2180,6 +2201,7 @@ export class MTextProcessor {
       }
     }
     this._hOffset += this.currentBlankAdvance
+    this._atWrapOpportunity = true
   }
 
   /**
@@ -2348,6 +2370,9 @@ export class MTextProcessor {
       this._hOffset += this.penAdvance(shape.width, obliqueExtraAdvance)
     }
     this._lineHasRenderableChar = true
+    // CJK and other non-Latin glyphs may be followed by a soft break; Latin
+    // glyphs inside a word must not open one.
+    this._atWrapOpportunity = (char.codePointAt(0) ?? 0) >= 0x0100
 
     const lineOffset = charHeight * 0.05
     const lineZ = 0.001
@@ -2657,6 +2682,7 @@ export class MTextProcessor {
     this._maxFontSize = 0
     this._maxLayoutFontSize = 0
     this._lineHasRenderableChar = false
+    this._atWrapOpportunity = true
   }
 
   /**

@@ -901,6 +901,42 @@ describe('MTextProcessor format state', () => {
     expect(getInternalLineCount(processor)).toBe(2)
   })
 
+  it('does not wrap where a property command splits one word', () => {
+    // Handle 33A8D1: `{\H0.6x;Y:\C256;37430392.9}` — the color command splits
+    // the token stream into `Y:` + `37430392.9`, but there is no whitespace
+    // between them, so AutoCAD keeps one visual line and overflows the box.
+    const { processor } = createProcessor('mesh', { maxWidth: 5 })
+
+    processor.processText([
+      { type: TOKEN_WORD, ctx: null, data: 'Y:' },
+      {
+        type: TOKEN_PROPERTIES_CHANGED,
+        ctx: null,
+        data: { command: 'C', changes: { aci: 256 }, depth: 1 }
+      },
+      { type: TOKEN_WORD, ctx: null, data: '37430392.9' }
+    ] as any)
+
+    expect(getInternalLineCount(processor)).toBe(1)
+  })
+
+  it('wraps a Latin token after whitespace even when a property command follows it', () => {
+    const { processor } = createProcessor('mesh', { maxWidth: 5 })
+
+    processor.processText([
+      { type: TOKEN_WORD, ctx: null, data: 'aa' },
+      { type: TOKEN_SPACE, ctx: null, data: null },
+      {
+        type: TOKEN_PROPERTIES_CHANGED,
+        ctx: null,
+        data: { command: 'C', changes: { aci: 256 }, depth: 1 }
+      },
+      { type: TOKEN_WORD, ctx: null, data: '1234567890' }
+    ] as any)
+
+    expect(getInternalLineCount(processor)).toBe(2)
+  })
+
   it('still soft-wraps CJK between characters inside the defined width', () => {
     const { processor } = createProcessor('mesh', { maxWidth: 3 })
 

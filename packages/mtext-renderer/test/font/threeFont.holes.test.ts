@@ -35,6 +35,28 @@ function createDemoFont(
   })
 }
 
+/** Total area of the triangulated fill, i.e. what actually gets painted. */
+function coveredArea(geometry: ShapeGeometry) {
+  const position = geometry.getAttribute('position')
+  const index = geometry.getIndex()
+  let area = 0
+  if (!index) return area
+  for (let i = 0; i < index.count; i += 3) {
+    const a = index.getX(i)
+    const b = index.getX(i + 1)
+    const c = index.getX(i + 2)
+    const ax = position.getX(a),
+      ay = position.getY(a)
+    const bx = position.getX(b),
+      by = position.getY(b)
+    const cx = position.getX(c),
+      cy = position.getY(c)
+    area += Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2
+  }
+  geometry.dispose()
+  return area
+}
+
 function expectHolesAndTriangulates(char: string, o: string) {
   const font = createDemoFont(char, {
     ha: 256,
@@ -57,11 +79,57 @@ function expectHolesAndTriangulates(char: string, o: string) {
 }
 
 describe('ThreeFont.generateShapes hole classification', () => {
-  it('assigns inner contours of 面 as holes via ShapePath.toShapes()', () => {
+  it('assigns the counter as a hole when both contours share one winding', () => {
+    // SimSun-style outline: outer and inner squares are both CCW.
+    // three < r185.1 toShapes() degrades to toShapesNoHoles() here, which
+    // renders the counter as a filled shape (digit 8 / 面 / 图 regression).
+    const font = createDemoFont('回', {
+      ha: 256,
+      x_min: 0,
+      x_max: 256,
+      o: 'm 0 0 l 100 0 l 100 100 l 0 100 l 0 0 z m 40 40 l 60 40 l 60 60 l 40 60 l 40 40 z'
+    })
+
+    const shapes = font.generateShapes('回', 100)
+
+    expect(shapes).toHaveLength(1)
+    expect(shapes[0].holes).toHaveLength(1)
+  })
+
+  it('keeps the counter of an island nested inside another hole (回)', () => {
+    // SimSun keeps 回's four contours innermost-first: the inner 口's counter
+    // comes before the inner 口 itself. Processing that counter as a standalone
+    // shape marks it as created, so the inner 口 is built without its hole and
+    // renders as a solid square (handle 337E88).
+    const font = createDemoFont('回', {
+      ha: 256,
+      x_min: 0,
+      x_max: 256,
+      o: [
+        // 0: inner 口 counter (deepest)
+        'm 98 72 l 157 72 l 157 128 l 98 128 l 98 72 z',
+        // 1: inner 口 outline
+        'm 84 44 l 179 44 l 179 143 l 84 143 l 84 44 z',
+        // 2: outer 口 outline
+        'm 35 -21 l 228 -21 l 228 198 l 35 198 l 35 -21 z',
+        // 3: outer 口 counter
+        'm 50 10 l 207 10 l 207 182 l 50 182 l 50 10 z'
+      ].join(' ')
+    })
+
+    const shapes = font.generateShapes('回', 100)
+
+    expect(shapes).toHaveLength(2)
+    expect(shapes.map(shape => shape.holes.length)).toEqual([1, 1])
+    // 0.01 * ((193*219 - 157*172) + (95*99 - 59*56)) font units squared
+    expect(coveredArea(new ShapeGeometry(shapes))).toBeCloseTo(213.64, 2)
+  })
+
+  it('assigns inner contours of 面 as holes', () => {
     expectHolesAndTriangulates('面', MIAN_OUTLINE)
   })
 
-  it('assigns inner contours of 图 as holes via ShapePath.toShapes()', () => {
+  it('assigns inner contours of 图 as holes', () => {
     expectHolesAndTriangulates('图', TU_OUTLINE)
   })
 })
