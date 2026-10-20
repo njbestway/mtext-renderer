@@ -359,7 +359,7 @@ describe('MTextProcessor format state', () => {
     expect(chars).toContain(STACK_DIVIDER_CHAR)
   })
 
-  it('positions stack divider with scaled font metrics', () => {
+  it('keeps stack divider on the row boundary regardless of font scale factor', () => {
     const { processor } = createProcessor('mesh', {}, 2)
     ;(processor as any)._options.collectCharBoxes = true
 
@@ -376,8 +376,48 @@ describe('MTextProcessor format state', () => {
     )
 
     expect(divider).toBeDefined()
-    expect(divider?.box.min.y).toBeCloseTo(-31.2, 3)
-    expect(divider?.box.max.y).toBeCloseTo(-31.2, 3)
+    expect(divider?.box.min.y).toBeCloseTo(0, 3)
+    expect(divider?.box.max.y).toBeCloseTo(0, 3)
+  })
+
+  it('keeps fraction divider between the rows inside \\H0.7x', () => {
+    const { processor } = createProcessor('shx')
+    ;(processor as any)._options.collectCharBoxes = true
+
+    const obj = processor.processText([
+      {
+        type: TOKEN_PROPERTIES_CHANGED,
+        ctx: null,
+        data: {
+          command: 'H',
+          changes: { capHeight: { value: 0.7, isRelative: true } },
+          depth: 1
+        }
+      },
+      {
+        type: TOKEN_STACK,
+        ctx: null,
+        data: ['1', '2', '/']
+      }
+    ] as any)
+
+    const boxes = getAllCharBoxes(obj)
+    const numerator = boxes.find(entry => entry.char === '1')
+    const denominator = boxes.find(entry => entry.char === '2')
+    const divider = boxes.find(entry => entry.char === STACK_DIVIDER_CHAR)
+
+    expect(numerator).toBeDefined()
+    expect(denominator).toBeDefined()
+    expect(divider).toBeDefined()
+    // Glyph height follows \H0.7x (24 * 0.7 = 16.8), so the numerator row
+    // starts 16.8 + 0.84 (gap) above the row top and the bar sits on it.
+    expect(divider!.box.min.y).toBeCloseTo(0, 5)
+    expect(numerator!.box.min.y).toBeCloseTo(0.84, 5)
+    // The bar sits between the two rows instead of crossing the denominator.
+    expect(numerator!.box.min.y).toBeGreaterThan(divider!.box.min.y)
+    expect(divider!.box.min.y).toBeGreaterThan(denominator!.box.max.y)
+    // Rows no longer overlap each other.
+    expect(numerator!.box.min.y).toBeGreaterThan(denominator!.box.max.y)
   })
 
   it('treats superscript stack as CHAR and does not add divider marker', () => {

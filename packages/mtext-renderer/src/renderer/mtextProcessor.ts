@@ -22,6 +22,7 @@ import {
 import { resolveMTextColor } from './colorUtils'
 import {
   LINE_SPACING_SCALE_FACTOR,
+  STACK_DIVIDER_GAP_FACTOR,
   STACK_VERTICAL_SHIFT_FACTOR
 } from './constants'
 import {
@@ -269,7 +270,7 @@ export class MTextProcessor {
   private _hOffset: number
   /** Maximum logical pen advance seen across all processed visual lines. */
   private _maxLineAdvance: number
-  /** Vertical baseline position of the current visual line. */
+  /** Vertical top edge of the current visual line (glyphs hang below it). */
   private _vOffset: number
   /** Number of visual lines processed so far (1-based while rendering). */
   private _lineCount: number
@@ -2000,7 +2001,18 @@ export class MTextProcessor {
         }
       }
     } else {
-      // Fraction case
+      // Fraction case: numerator above, divider, denominator below.
+      // `_vOffset` is the top edge of the row and glyphs occupy
+      // [_vOffset - currentLayoutFontSize, _vOffset], so both rows must be
+      // placed from that edge. Mixing `currentFontSize` with `defaultFontSize`
+      // here used to put the bar inside the denominator (visible on
+      // `\H0.7x;\SBK4400/94.299;`).
+      const stackLayoutFontSize = this.currentLayoutFontSize
+      const dividerGap = stackLayoutFontSize * STACK_DIVIDER_GAP_FACTOR
+      const numeratorTop =
+        currentVOffset + stackLayoutFontSize + dividerGap
+      const denominatorTop = currentVOffset - dividerGap
+
       // Second pass: render numerator
       const numeratorGeometries: THREE.BufferGeometry[] = []
       const numeratorLineGeometries: THREE.BufferGeometry[] = []
@@ -2008,10 +2020,7 @@ export class MTextProcessor {
       const numeratorLineCharBoxes: CharBox[] = []
 
       this._hOffset = currentHOffset + numeratorOffset
-      this._vOffset = this.convertTopAlignedVOffset(
-        currentVOffset + this.currentFontSize * 0.3,
-        this.currentFontSize
-      )
+      this._vOffset = numeratorTop
       for (const char of numerator) {
         this.processChar(
           char,
@@ -2044,10 +2053,7 @@ export class MTextProcessor {
       const denominatorLineCharBoxes: CharBox[] = []
 
       this._hOffset = currentHOffset + denominatorOffset
-      this._vOffset = this.convertTopAlignedVOffset(
-        currentVOffset - this.currentFontSize * 0.6,
-        this.currentFontSize
-      )
+      this._vOffset = denominatorTop
       for (const char of denominator) {
         this.processChar(
           char,
@@ -2067,14 +2073,10 @@ export class MTextProcessor {
         const lineGeometry = new THREE.BufferGeometry()
         const lineVertices = new Float32Array([
           currentHOffset,
-          currentVOffset -
-            this.currentFontSize * 0.8 +
-            this.defaultFontSize * STACK_VERTICAL_SHIFT_FACTOR,
+          currentVOffset,
           0,
           currentHOffset + fractionWidth,
-          currentVOffset -
-            this.currentFontSize * 0.8 +
-            this.defaultFontSize * STACK_VERTICAL_SHIFT_FACTOR,
+          currentVOffset,
           0
         ])
         lineGeometry.setAttribute(
@@ -2101,27 +2103,23 @@ export class MTextProcessor {
    * Records a zero-height char box for a stack fraction divider in logical char order.
    *
    * @param startX Horizontal start of the fraction bar in drawing space.
-   * @param currentVOffset Vertical baseline of the stack relative to the main line.
+   * @param dividerY Vertical position of the fraction bar.
    * @param width Horizontal extent of the fraction bar.
    * @param meshCharBoxes Mesh char-box accumulator.
    * @param lineCharBoxes Line char-box accumulator.
    */
   private recordStackDivider(
     startX: number,
-    currentVOffset: number,
+    dividerY: number,
     width: number,
     meshCharBoxes: CharBox[],
     lineCharBoxes: CharBox[]
   ) {
     if (this._options.collectCharBoxes === false) return
 
-    const y =
-      currentVOffset -
-      this.currentFontSize * 0.8 +
-      this.defaultFontSize * STACK_VERTICAL_SHIFT_FACTOR
     const box = new THREE.Box3(
-      new THREE.Vector3(startX, y, 0),
-      new THREE.Vector3(startX + width, y, 0)
+      new THREE.Vector3(startX, dividerY, 0),
+      new THREE.Vector3(startX + width, dividerY, 0)
     )
 
     const target = this.resolveCharBoxTarget(meshCharBoxes, lineCharBoxes)
@@ -2143,8 +2141,8 @@ export class MTextProcessor {
   }
 
   /**
-   * Convert a legacy top-anchored vOffset (used by stack/sub/sup logic) into
-   * the current baseline-anchored coordinate system.
+   * Convert a legacy top-anchored vOffset (used by superscript/subscript
+   * logic) into the current baseline-anchored coordinate system.
    *
    * @param legacyTopAlignedVOffset Vertical position in the legacy top-anchored system.
    * @param fontSize Font size associated with the legacy offset.

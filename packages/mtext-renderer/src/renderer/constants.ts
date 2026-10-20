@@ -24,3 +24,12 @@ export const DEFAULT_LINE_SPACE_STYLE = 1
  * top-anchored to baseline-anchored coordinates.
  */
 export const STACK_VERTICAL_SHIFT_FACTOR = 0.3
+
+/**
+ * Clear space between a fraction stack divider and the rows above/below it,
+ * as a fraction of the current glyph height.
+ *
+ * The bar must stay outside both the numerator descenders and the denominator
+ * cap line; otherwise it is drawn through the lower row.
+ */
+export const STACK_DIVIDER_GAP_FACTOR = 0.05
