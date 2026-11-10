@@ -2789,7 +2789,6 @@ export class MTextProcessor {
     }
     this.captureCurrentLineAdvance()
     this.recordCurrentLineLayout()
-    this._hOffset = 0
     if (!this._lineHasRenderableChar) {
       this._pendingEmptyLineFontSizeAdjust = this.currentFontSize
     } else {
@@ -2804,6 +2803,7 @@ export class MTextProcessor {
     this.processAlignment()
     this._lineStartOffset = 0
     this._currentLineObjects = []
+    this._hOffset = 0
     if (this._lineCount == 2) {
       this._totalHeight = this.currentMaxFontSize
     } else {
@@ -3050,8 +3050,9 @@ export class MTextProcessor {
             : 0
         const translated = new Set<THREE.Object3D>()
         distributeTargets.forEach((entry, index) => {
-          const dx =
-            gap * index + (this._currentLeftMargin - resolvedBBox.min.x)
+          // Same pen-origin rule as LEFT: keep leading spaces / indent baked
+          // into layout X rather than cancelling them via ink bbox.
+          const dx = gap * index + this._currentLeftMargin
           entry.apply(dx)
           if (!translated.has(entry.owner)) {
             translateCharBoxes(entry.owner, dx)
@@ -3067,8 +3068,7 @@ export class MTextProcessor {
                 t.owner === entry.owner || t.owner.parent === entry.owner
             )
             const index = matched >= 0 ? matched : 0
-            const dx =
-              gap * index + (this._currentLeftMargin - resolvedBBox.min.x)
+            const dx = gap * index + this._currentLeftMargin
             this.translateMeshGlyphPlacements(entry.placements, dx, 0)
           })
         }
