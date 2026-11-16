@@ -25,6 +25,13 @@ export class DefaultFontLoader implements FontLoader {
    * (e.g. jsDelivr `@main` with a long max-age).
    */
   private _catalogRefreshAttempted = false
+  /**
+   * In-flight catalog revalidation. Concurrent {@link load} callers (common
+   * when style primary + bigfont are requested via `requestFonts`) must all
+   * await the same refresh; otherwise a sibling can read the stale map, mark
+   * the new face `NotFound`, and sticky-skip it for the rest of the session.
+   */
+  private _catalogRefreshPromise: Promise<FontInfo[]> | null = null
 
   /**
    * Creates a new instance of DefaultFontLoader
@@ -48,6 +55,7 @@ export class DefaultFontLoader implements FontLoader {
     this._baseUrl = value
     this.clearAvailableFontsCache()
     this._catalogRefreshAttempted = false
+    this._catalogRefreshPromise = null
     this.onFontUrlChanged(value)
   }
 
@@ -113,10 +121,9 @@ export class DefaultFontLoader implements FontLoader {
     const alreadyLoadedFast: FontLoadStatus[] = []
     let allLoaded = true
     for (const font of fontNames) {
-      const lowerCaseFontName = font.toLowerCase()
-      if (FontManager.instance.isFontLoaded(lowerCaseFontName)) {
+      if (FontManager.instance.isFontLoaded(this.catalogLookupKey(font))) {
         alreadyLoadedFast.push({
-          fontName: lowerCaseFontName,
+          fontName: this.bareFontKey(font),
           url: '',
           status: 'Success'
         })
@@ -131,15 +138,15 @@ export class DefaultFontLoader implements FontLoader {
 
     await this.getAvailableFonts()
 
-    // Stale HTTP-cached fonts.json can omit newly published faces (e.g. malgun).
-    // Keep normal caching for the common path; revalidate at most once per baseUrl
-    // when a requested name is absent from the in-memory catalog.
+    // Stale HTTP-cached fonts.json can omit newly published faces (e.g. malgun,
+    // hztxt2). Keep normal caching for the common path; revalidate at most once
+    // per baseUrl when a requested name is absent from the in-memory catalog.
+    // Concurrent loads must share that refresh (see _catalogRefreshPromise).
     const missingFromCatalog = fontNames.some(
-      font => !this._avaiableFontMap.has(this.catalogKey(font))
+      font => !this._avaiableFontMap.has(this.catalogLookupKey(font))
     )
-    if (missingFromCatalog && !this._catalogRefreshAttempted) {
-      this._catalogRefreshAttempted = true
-      await this.refreshAvailableFontsFromNetwork()
+    if (missingFromCatalog) {
+      await this.ensureCatalogRefreshedOnce()
     }
 
     const alreadyLoadedStatuses: FontLoadStatus[] = []
@@ -147,13 +154,15 @@ export class DefaultFontLoader implements FontLoader {
     const requestedFontInfos = new Map<string, FontInfo>()
     const seenFiles = new Set<string>()
     fontNames.forEach(font => {
-      const lowerCaseFontName = font.toLowerCase()
-      const fontInfo = this._avaiableFontMap.get(this.catalogKey(font))
+      // Statuses are reported under the requested (extension-stripped) name;
+      // the catalog entry is resolved through the alias-aware key.
+      const fontKey = this.bareFontKey(font)
+      const fontInfo = this._avaiableFontMap.get(this.catalogLookupKey(font))
       if (fontInfo) {
-        requestedFontInfos.set(lowerCaseFontName, fontInfo)
-        if (FontManager.instance.isFontLoaded(lowerCaseFontName)) {
+        requestedFontInfos.set(fontKey, fontInfo)
+        if (FontManager.instance.isFontLoaded(fontKey)) {
           alreadyLoadedStatuses.push({
-            fontName: lowerCaseFontName,
+            fontName: fontKey,
             url: fontInfo.url,
             status: 'Success'
           })
@@ -180,18 +189,18 @@ export class DefaultFontLoader implements FontLoader {
 
     const statuses: FontLoadStatus[] = []
     for (const font of fontNames) {
-      const lowerCaseFontName = font.toLowerCase()
-      const directStatus = statusMap[lowerCaseFontName]
+      const fontKey = this.bareFontKey(font)
+      const directStatus = statusMap[fontKey]
       if (directStatus) {
         statuses.push(directStatus)
         continue
       }
 
-      const fontInfo = requestedFontInfos.get(lowerCaseFontName)
+      const fontInfo = requestedFontInfos.get(fontKey)
       if (fontInfo) {
-        if (FontManager.instance.isFontLoaded(lowerCaseFontName)) {
+        if (FontManager.instance.isFontLoaded(fontKey)) {
           statuses.push({
-            fontName: lowerCaseFontName,
+            fontName: fontKey,
             url: fontInfo.url,
             status: 'Success'
           })
@@ -204,7 +213,7 @@ export class DefaultFontLoader implements FontLoader {
         const loadedByFile = statusMap[fileBaseName]
         if (loadedByFile) {
           statuses.push({
-            fontName: lowerCaseFontName,
+            fontName: fontKey,
             url: fontInfo.url,
             status: loadedByFile.status
           })
@@ -214,7 +223,7 @@ export class DefaultFontLoader implements FontLoader {
 
       if (await FontManager.instance.loadFontFromCache(font)) {
         statuses.push({
-          fontName: lowerCaseFontName,
+          fontName: fontKey,
           url: '',
           status: 'Success'
         })
@@ -222,30 +231,12 @@ export class DefaultFontLoader implements FontLoader {
       }
 
       statuses.push({
-        fontName: lowerCaseFontName,
+        fontName: fontKey,
         url: '',
         status: 'NotFound'
       })
     }
     return statuses
-  }
-
-  /**
-   * Catalog key of a requested font name: the name itself when the repository
-   * publishes it, otherwise its built-in alias face (`MS PGothic` is served by
-   * the `msgothic` collection). Statuses stay reported under the requested
-   * name, the file-derived status merge in {@link load} maps the alias result
-   * back.
-   */
-  private catalogKey(fontName: string): string {
-    const lowerCaseFontName = fontName.toLowerCase()
-    if (this._avaiableFontMap.has(lowerCaseFontName)) {
-      return lowerCaseFontName
-    }
-    const alias = resolveFontNameAlias(lowerCaseFontName)
-    return alias && this._avaiableFontMap.has(alias)
-      ? alias
-      : lowerCaseFontName
   }
 
   private clearAvailableFontsCache() {
@@ -255,11 +246,62 @@ export class DefaultFontLoader implements FontLoader {
   }
 
   /**
-   * Drops the in-memory catalog and refetches `fonts.json`, bypassing the HTTP
-   * cache so CDN updates are visible after a miss.
+   * Request key used for status reporting: file name without extension,
+   * lowercased. Catalog faces are stored without `.shx` / `.ttf` extensions,
+   * so style file names still hit the map.
+   */
+  private bareFontKey(fontName: string): string {
+    return getFileNameWithoutExtension(fontName).toLowerCase()
+  }
+
+  /**
+   * Catalog key of a requested font name: the bare key when the repository
+   * publishes it, otherwise its built-in alias face (`MS PGothic` is served by
+   * the `msgothic` collection). Statuses stay reported under the requested
+   * name, the file-derived status merge in {@link load} maps the alias result
+   * back.
+   */
+  private catalogLookupKey(fontName: string): string {
+    const lowerCaseFontName = this.bareFontKey(fontName)
+    if (this._avaiableFontMap.has(lowerCaseFontName)) {
+      return lowerCaseFontName
+    }
+    const alias = resolveFontNameAlias(lowerCaseFontName)
+    return alias && this._avaiableFontMap.has(alias)
+      ? alias
+      : lowerCaseFontName
+  }
+
+  /**
+   * Starts or joins the single per-baseUrl catalog revalidation so concurrent
+   * {@link load} callers all see the refreshed map before resolving misses.
+   */
+  private async ensureCatalogRefreshedOnce(): Promise<void> {
+    if (this._catalogRefreshPromise) {
+      await this._catalogRefreshPromise
+      return
+    }
+    if (this._catalogRefreshAttempted) {
+      return
+    }
+    this._catalogRefreshAttempted = true
+    const promise = this.refreshAvailableFontsFromNetwork().finally(() => {
+      if (this._catalogRefreshPromise === promise) {
+        this._catalogRefreshPromise = null
+      }
+    })
+    this._catalogRefreshPromise = promise
+    await promise
+  }
+
+  /**
+   * Refetches `fonts.json`, bypassing the HTTP cache so CDN updates are
+   * visible after a miss. Keeps the current in-memory catalog until the new
+   * payload replaces it — clearing first races concurrent {@link load} calls
+   * into an empty map (they report catalog faces as `NotFound` and sticky-miss
+   * them for the session).
    */
   private async refreshAvailableFontsFromNetwork(): Promise<FontInfo[]> {
-    this.clearAvailableFontsCache()
     const baseUrl = this._baseUrl
     const promise = this.fetchAvailableFonts(baseUrl, {
       bypassHttpCache: true
@@ -308,10 +350,12 @@ export class DefaultFontLoader implements FontLoader {
   }
 
   /**
-   * Build one font map. The key is font name. The value is font info.
+   * Rebuild the name → FontInfo map from {@link _avaiableFonts}. Clears first
+   * so a refreshed catalog cannot leave stale keys behind.
    */
   private buildFontMap() {
     const fontMap = this._avaiableFontMap
+    fontMap.clear()
     this._avaiableFonts.forEach(font => {
       font.name.forEach(name => {
         fontMap.set(name.toLowerCase(), font)

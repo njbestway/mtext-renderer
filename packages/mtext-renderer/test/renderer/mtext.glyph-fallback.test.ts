@@ -239,7 +239,7 @@ describe('MTextProcessor TextStyle glyph fallback (AutoCAD semantics)', () => {
     expect(shape).toEqual(defaultShape)
     expect(getCharShape).toHaveBeenCalledTimes(1)
     expect(getCharShape).toHaveBeenCalledWith(cjkChar, primaryFont, 10)
-    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10)
+    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10, 'shx')
   })
 
   it('falls back to default fonts when primary and bigFont both lack the glyph', () => {
@@ -278,7 +278,7 @@ describe('MTextProcessor TextStyle glyph fallback (AutoCAD semantics)', () => {
     expect(shape).toBe(defaultShape)
     expect(getCharShape).toHaveBeenCalledWith(cjkChar, primaryFont, 10)
     expect(getCharShape).toHaveBeenCalledWith(cjkChar, bigFontName, 10)
-    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10)
+    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10, 'shx')
   })
 
   it.each([
@@ -643,7 +643,7 @@ describe('MTextProcessor TextStyle glyph fallback (AutoCAD semantics)', () => {
 
     expect(shape).toBe(defaultShape)
     expect(getCharShape).toHaveBeenCalledTimes(1)
-    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10)
+    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10, 'shx')
   })
 
   it('draws the glyph from another loaded face before the not-found placeholder', () => {
@@ -709,7 +709,7 @@ describe('MTextProcessor TextStyle glyph fallback (AutoCAD semantics)', () => {
     expect(shape).toBe(notFoundShape)
     expect(getCharShape).toHaveBeenCalledWith(cjkChar, primaryFont, 10)
     expect(getCharShape).toHaveBeenCalledWith(cjkChar, bigFontName, 10)
-    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10)
+    expect(getCharShapeFromDefaults).toHaveBeenCalledWith(cjkChar, 10, 'shx')
     expect(getCodeShapeFromSymbolFonts).toHaveBeenCalledWith(
       cjkChar.codePointAt(0),
       10
